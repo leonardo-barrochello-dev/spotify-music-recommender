@@ -1,8 +1,9 @@
 import random
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Tuple
 from app.models.schemas import Track, Artist
 from app.services.spotify_service import SpotifyService
 import logging
+from app.enums import SearchType
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +15,11 @@ class CandidateGenerator:
 
     async def generate(
         self, top_tracks: List[Track], top_artists: List[Artist], access_token: str
-    ) -> List[Track]:
+    ) -> Tuple[List[Track], Dict[str, float]]:
 
         all_candidates: List[Track] = []
         known_track_ids = {t.id for t in top_tracks}
+        candidate_scores: Dict[str, float] = {}
 
         sources = {"artist_based": 0, "track_based": 0, "exploration": 0}
 
@@ -29,8 +31,8 @@ class CandidateGenerator:
                 # 🔥 busca mais contextual (não só "artist name track")
                 query = f"{artist.name}"
 
-                tracks = await self.spotify_service.search_tracks(
-                    access_token, query=query, limit=15
+                tracks = await self.spotify_service.search(
+                    access_token, type=SearchType.TRACK, query=query, limit=10
                 )
 
                 for t in tracks:
@@ -38,6 +40,7 @@ class CandidateGenerator:
                         all_candidates.append(t)
                         self._seen_track_ids.add(t.id)
                         sources["artist_based"] += 1
+                        candidate_scores[t.id] = candidate_scores.get(t.id, 0) + 2
 
             except Exception as e:
                 logger.warning(f"Artist search failed for {artist.name}: {e}")
@@ -45,8 +48,7 @@ class CandidateGenerator:
         # =====================================================
         # 🔹 2. BASEADO EM MÚSICAS (similaridade indireta)
         # =====================================================
-        import random
-
+        
         random.shuffle(top_tracks)
 
         sample_tracks = top_tracks[:5]
@@ -59,8 +61,8 @@ class CandidateGenerator:
                 )
                 query = f"{base_track.name} {artist_name}"
 
-                tracks = await self.spotify_service.search_tracks(
-                    access_token, query=query, limit=10
+                tracks = await self.spotify_service.search(
+                    access_token, type=SearchType.TRACK, query=query, limit=10
                 )
 
                 for t in tracks:
@@ -68,6 +70,7 @@ class CandidateGenerator:
                         all_candidates.append(t)
                         self._seen_track_ids.add(t.id)
                         sources["track_based"] += 1
+                        candidate_scores[t.id] = candidate_scores.get(t.id, 0) + 3
 
             except Exception as e:
                 logger.warning(f"Track search failed for {base_track.name}: {e}")
@@ -89,8 +92,8 @@ class CandidateGenerator:
 
         for genre in genre_seeds[:4]:
             try:
-                tracks = await self.spotify_service.search_tracks(
-                    access_token, query=genre, limit=10
+                tracks = await self.spotify_service.search(
+                    access_token, type=SearchType.TRACK, query=genre, limit=10
                 )
 
                 for t in tracks:
@@ -98,6 +101,7 @@ class CandidateGenerator:
                         all_candidates.append(t)
                         self._seen_track_ids.add(t.id)
                         sources["exploration"] += 1
+                        candidate_scores[t.id] = candidate_scores.get(t.id, 0) + 1
 
             except Exception as e:
                 logger.warning(f"Exploration search failed for {genre}: {e}")
@@ -121,7 +125,7 @@ class CandidateGenerator:
         logger.info(f"Candidate generation summary: {sources}")
         logger.info(f"Final candidates: {len(candidates)} tracks")
 
-        return candidates
+        return candidates, candidate_scores
 
     def clear_seen(self):
         self._seen_track_ids.clear()

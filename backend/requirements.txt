@@ -7,3 +7,4 @@ pydantic-settings>=2.1.0
 python-jose[cryptography]>=3.3.0
 numpy>=1.26.0
 sentence-transformers>=2.2.0
+redis>=5.0.0

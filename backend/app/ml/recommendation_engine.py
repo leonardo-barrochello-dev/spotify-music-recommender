@@ -3,8 +3,10 @@ from sentence_transformers import SentenceTransformer
 from typing import List, Tuple, Optional, Dict
 import logging
 import time
+import json
 
 from app.models.schemas import Track
+from app.utils.cache import get_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -72,21 +74,40 @@ class RecommendationEngine:
         """
         Converte lista de músicas em embeddings.
 
-        Usa cache para evitar recomputação.
+        Usa cache (Redis + memória) para evitar recomputação.
         Usa batch encoding para performance.
         """
 
         texts = [self.track_to_text(t) for t in tracks]
         track_ids = [t.id for t in tracks]
+        redis_client = get_redis_client()
 
-        # Identifica quais ainda não estão no cache
+        # Identifica quais ainda não estão no cache de memória
         uncached_ids = []
         uncached_texts = []
+        embeddings_from_redis = {}
 
         for tid, text in zip(track_ids, texts):
-            if tid not in self._embedding_cache:
-                uncached_ids.append(tid)
-                uncached_texts.append(text)
+            if tid in self._embedding_cache:
+                continue
+
+            # Tenta buscar no Redis
+            if redis_client:
+                try:
+                    cached = redis_client.get(f"track:{tid}:embedding")
+                    if cached:
+                        emb = np.array(json.loads(cached), dtype=np.float32)
+                        self._embedding_cache[tid] = emb
+                        embeddings_from_redis[tid] = True
+                        continue
+                except Exception as e:
+                    logger.warning(f"Redis embedding cache read failed for {tid}: {e}")
+
+            uncached_ids.append(tid)
+            uncached_texts.append(text)
+
+        if embeddings_from_redis:
+            logger.info(f"Loaded {len(embeddings_from_redis)} embeddings from Redis cache")
 
         # Codifica apenas os novos
         if uncached_texts:
@@ -97,9 +118,20 @@ class RecommendationEngine:
                 show_progress_bar=False
             )
 
-            # Salva no cache
+            # Salva no cache de memória e Redis
             for tid, emb in zip(uncached_ids, embeddings):
                 self._embedding_cache[tid] = emb
+
+                # Salva no Redis (TTL: 1 hora)
+                if redis_client:
+                    try:
+                        redis_client.setex(
+                            f"track:{tid}:embedding",
+                            3600,
+                            json.dumps(emb.tolist())
+                        )
+                    except Exception as e:
+                        logger.warning(f"Redis embedding cache write failed for {tid}: {e}")
 
             logger.info(
                 f"Encoded {len(uncached_texts)} new tracks in {time.time() - start:.2f}s"
@@ -210,11 +242,13 @@ class RecommendationEngine:
         self,
         user_tracks: List[Track],
         candidate_tracks: List[Track],
+        candidate_scores: Optional[Dict[str, float]] = None,
         limit: int = 20,
         mood: Optional[str] = None
     ) -> List[Track]:
         """
         Pipeline principal do recomendador.
+        Combina embedding similarity com candidate scores (hybrid scoring).
         """
 
         if not candidate_tracks:
@@ -234,22 +268,35 @@ class RecommendationEngine:
         # 3. Similaridade
         similarities = self.compute_similarity(user_embedding, item_embeddings)
 
-        # 4. Aplicar mood (boost)
+        # 4. Normalizar e combinar com candidate_scores (hybrid scoring)
+        if candidate_scores:
+            max_score = max(candidate_scores.values()) if candidate_scores else 1
+            normalized_scores = np.array([
+                candidate_scores.get(track.id, 0) / max_score
+                for track in candidate_tracks
+            ])
+            # Combina: 70% embedding similarity + 30% candidate score
+            final_scores = (similarities * 0.7) + (normalized_scores * 0.3)
+            logger.info("Using hybrid scoring (70% similarity + 30% candidate score)")
+        else:
+            final_scores = similarities
+
+        # 5. Aplicar mood (boost)
         if mood:
-            similarities = self.apply_mood_boost(
+            final_scores = self.apply_mood_boost(
                 candidate_tracks,
-                similarities,
+                final_scores,
                 mood
             )
 
-        # 5. Ordenar (desc)
-        top_indices = np.argsort(similarities)[::-1][:limit]
+        # 6. Ordenar (desc)
+        top_indices = np.argsort(final_scores)[::-1][:limit]
 
         logger.info(
             f"Ranking completed in {time.time() - start:.2f}s"
         )
 
-        # 6. Retornar tracks ordenadas
+        # 7. Retornar tracks ordenadas
         ranked_tracks = [candidate_tracks[i] for i in top_indices]
 
         return ranked_tracks

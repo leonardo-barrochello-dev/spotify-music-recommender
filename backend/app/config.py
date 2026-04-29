@@ -11,7 +11,12 @@ class Settings(BaseSettings):
     SPOTIFY_AUTH_URL: str = "https://accounts.spotify.com/authorize"
     SPOTIFY_TOKEN_URL: str = "https://accounts.spotify.com/api/token"
     SPOTIFY_API_BASE_URL: str = "https://api.spotify.com/v1"
-    
+
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_ENABLED: bool = True
+
     SPOTIFY_SCOPES: List[str] = [
         "user-read-private",
         "user-read-email",
@@ -19,7 +24,7 @@ class Settings(BaseSettings):
         "playlist-modify-public",
         "playlist-modify-private"
     ]
-    
+
     class Config:
         env_file = ".env"
         case_sensitive = True

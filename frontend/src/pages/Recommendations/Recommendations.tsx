@@ -27,7 +27,7 @@ export default function Recommendations() {
   const loadRecommendations = async (mood = '') => {
     setLoadingRecommendations(true);
     try {
-      const data = await recommendationService.getRecommendations(20, mood || null);
+      const data = await recommendationService.getRecommendations(50, mood || null);
       setRecommendations(data.tracks || []);
       setUserVector(data.user_vector || null);
       setExplanation(data.explanation || '');
@@ -100,11 +100,10 @@ export default function Recommendations() {
           <div className="flex flex-wrap gap-3">
             <button
               onClick={() => handleMoodChange('')}
-              className={`px-5 py-2 rounded-full font-semibold transition-all ${
-                selectedMood === ''
+              className={`px-5 py-2 rounded-full font-semibold transition-all ${selectedMood === ''
                   ? 'bg-spotify-green text-black'
                   : 'bg-spotify-darkGray text-white hover:bg-spotify-darkerGray'
-              }`}
+                }`}
             >
               All
             </button>
@@ -112,11 +111,10 @@ export default function Recommendations() {
               <button
                 key={mood.value}
                 onClick={() => handleMoodChange(mood.value)}
-                className={`px-5 py-2 rounded-full font-semibold transition-all ${
-                  selectedMood === mood.value
+                className={`px-5 py-2 rounded-full font-semibold transition-all ${selectedMood === mood.value
                     ? 'bg-spotify-green text-black'
                     : 'bg-spotify-darkGray text-white hover:bg-spotify-darkerGray'
-                }`}
+                  }`}
                 title={mood.description}
               >
                 {mood.label}
