@@ -9,67 +9,92 @@ from app.models.schemas import (
     Track
 )
 from app.ml.recommendation_engine import RecommendationEngine
-from typing import List
+from app.ml.candidate_generator import CandidateGenerator
+from typing import List, Optional
+import traceback
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 spotify_service = SpotifyService()
 recommendation_engine = RecommendationEngine()
+candidate_generator = CandidateGenerator(spotify_service)
 
 
 @router.get("/", response_model=RecommendationResponse)
 async def get_recommendations(
-    request: RecommendationRequest = Depends(),
+    limit: int = 20,
+    mood: Optional[str] = None,
     access_token: str = Depends(get_spotify_token),
     current_user: dict = Depends(get_current_user)
 ):
+    request = RecommendationRequest(limit=limit, mood=mood)
     try:
+        logger.info(f"Getting recommendations for user: {current_user['spotify_user_id']}, limit={limit}, mood={mood}")
+        
         top_tracks = await spotify_service.get_top_tracks(access_token, limit=20)
         top_artists = await spotify_service.get_top_artists(access_token, limit=5)
         
         if not top_tracks:
             raise HTTPException(status_code=400, detail="No top tracks found to build preferences")
         
-        track_ids = [track.id for track in top_tracks]
-        audio_features = await spotify_service.get_audio_features(access_token, track_ids)
+        logger.info(f"User has {len(top_tracks)} top tracks and {len(top_artists)} top artists")
         
-        tracks_with_features = [t for t in top_tracks if t.id in audio_features]
-        if not tracks_with_features:
-            raise HTTPException(status_code=400, detail="Could not fetch audio features")
+        genres = set()
+        for artist in top_artists:
+            genres.update(artist.genres[:2])
         
-        candidate_tracks = []
-        for artist in top_artists[:3]:
-            related_artists = await spotify_service.get_related_artists(access_token, artist.id)
-            for related_artist in related_artists[:5]:
-                artist_tracks = await spotify_service.get_artist_top_tracks(access_token, related_artist.id)
-                candidate_tracks.extend(artist_tracks)
+        genres_list = list(genres)[:5]
+        logger.info(f"User genres: {genres_list}")
         
-        known_track_ids = set(track_ids)
+        candidate_tracks = await candidate_generator.generate(
+            top_tracks=top_tracks,
+            top_artists=top_artists,
+            access_token=access_token
+        )
+        
+        if not candidate_tracks:
+            logger.warning("No candidates generated, using exploration queries")
+            for query in ["rock", "pop", "electronic", "hip-hop"]:
+                try:
+                    tracks = await spotify_service.search_tracks(access_token, query, limit=10)
+                    candidate_tracks.extend(tracks)
+                except Exception as e:
+                    logger.warning(f"Exploration search failed: {e}")
+        
+        known_track_ids = {t.id for t in top_tracks}
         candidate_tracks = [t for t in candidate_tracks if t.id not in known_track_ids]
         
-        candidate_ids = list(set([t.id for t in candidate_tracks]))
-        candidate_audio_features = await spotify_service.get_audio_features(access_token, candidate_ids)
+        import random
+        random.shuffle(candidate_tracks)
         
-        for track in candidate_tracks:
-            if track.id in candidate_audio_features:
-                track.audio_features = candidate_audio_features[track.id]
+        logger.info(f"Found {len(candidate_tracks)} candidate tracks before ranking")
         
-        candidate_tracks = [t for t in candidate_tracks if t.audio_features]
-        
-        recommended_tracks, user_vector, explanation = recommendation_engine.generate_recommendations(
-            user_tracks=tracks_with_features,
+        recommended_tracks = recommendation_engine.rank_tracks(
+            user_tracks=top_tracks,
             candidate_tracks=candidate_tracks,
-            limit=request.limit,
-            mood=request.mood
+            limit=limit,
+            mood=mood
         )
+        
+        logger.info(f"Returning {len(recommended_tracks)} recommended tracks")
+        
+        explanation = f"Based on your top {len(top_tracks)} tracks"
+        if genres_list:
+            explanation += f" and genres like {', '.join(genres_list)}"
+        if mood:
+            explanation += f" with a {mood} mood"
         
         return RecommendationResponse(
             tracks=recommended_tracks,
-            user_vector=user_vector,
+            user_vector=None,
             explanation=explanation
         )
         
     except Exception as e:
+        logger.error(f"Error generating recommendations: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to generate recommendations: {str(e)}")
 
 

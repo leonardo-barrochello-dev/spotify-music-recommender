@@ -45,7 +45,7 @@ async def get_spotify_token(
     spotify_token = token_service.get_spotify_token(spotify_user_id)
     
     if spotify_token:
-        print(f"[Dependencies] Found valid Spotify token for: {spotify_user_id}")
+        print(f"[Dependencies] Found valid Spotify token for: {spotify_user_id} , token : {spotify_token}")
         return spotify_token
     
     # Token expirado ou não encontrado, tentar fazer refresh

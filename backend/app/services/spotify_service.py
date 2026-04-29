@@ -1,7 +1,11 @@
 import httpx
+import logging
+from fastapi import HTTPException
 from app.config import settings
 from app.models.schemas import User, Track, Artist
 from typing import List, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class SpotifyService:
@@ -102,21 +106,46 @@ class SpotifyService:
         if not track_ids:
             return {}
         
-        async with httpx.AsyncClient() as client:
-            ids_str = ",".join(track_ids)
-            response = await client.get(
-                f"{self.api_base_url}/audio-features?ids={ids_str}",
-                headers=self._get_headers(access_token)
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            features = {}
-            for item in data["audio_features"]:
-                if item:
-                    features[item["id"]] = item
-            
-            return features
+        features = {}
+        for i in range(0, len(track_ids), 100):
+            batch_ids = track_ids[i:i+100]
+            ids_param = ",".join(batch_ids)
+            logger.info(f"Requesting audio-features for {len(batch_ids)} tracks...")
+            logger.info(f"Full URL: {self.api_base_url}/audio-features?ids={','.join(batch_ids)}")
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.api_base_url}/audio-features",
+                    headers=self._get_headers(access_token),
+                    params={"ids": ",".join(batch_ids)}
+                )
+                logger.info(f"Response status: {response.status_code}")
+                
+                if response.status_code == 403:
+                    test_response = await client.get(
+                        f"{self.api_base_url}/me",
+                        headers=self._get_headers(access_token)
+                    )
+                    logger.info(f"Test /me status: {test_response.status_code}")
+                    
+                    if test_response.status_code == 403:
+                        logger.error(f"403 on ALL endpoints - Token is REVOKED or invalid. User needs to login again.")
+                        error_data = response.json()
+                        logger.error(f"Full error response: {error_data}")
+                        return {}
+                    
+                    logger.error(f"403 Forbidden on audio-features only - other endpoints work")
+                    return {}
+                
+                if response.status_code >= 400:
+                    logger.error(f"Response body: {response.text}")
+                response.raise_for_status()
+                data = response.json()
+                
+                for item in data["audio_features"]:
+                    if item:
+                        features[item["id"]] = item
+        
+        return features
     
     async def get_related_artists(
         self,
@@ -161,6 +190,41 @@ class SpotifyService:
             
             tracks = []
             for item in data["tracks"]:
+                track = Track(
+                    id=item["id"],
+                    name=item["name"],
+                    artists=[{"id": a["id"], "name": a["name"]} for a in item["artists"]],
+                    album={
+                        "id": item["album"]["id"],
+                        "name": item["album"]["name"],
+                        "images": item["album"]["images"]
+                    },
+                    duration_ms=item["duration_ms"],
+                    preview_url=item.get("preview_url"),
+                    external_urls=item["external_urls"]
+                )
+                tracks.append(track)
+            
+            return tracks
+    
+    async def search_tracks(
+        self,
+        access_token: str,
+        query: str,
+        limit: int = 10,
+        market: str = "US"
+    ) -> List[Track]:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.api_base_url}/search",
+                headers=self._get_headers(access_token),
+                params={"q": query, "type": "track", "limit": limit, "market": market}
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            tracks = []
+            for item in data.get("tracks", {}).get("items", []):
                 track = Track(
                     id=item["id"],
                     name=item["name"],
